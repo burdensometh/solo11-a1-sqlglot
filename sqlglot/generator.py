@@ -681,6 +681,14 @@ class Generator:
         exp.DType.SMALLDATETIME: "TIMESTAMP",
     }
 
+    # TYPE_MAPPING entries that are approximations rather than exact equivalents, mapping
+    # the source DType to a description of what may be lost in translation. Mappings that
+    # preserve semantics (e.g. NCHAR -> CHAR) are intentionally absent to avoid noise.
+    APPROXIMATE_TYPE_MAPPINGS: t.ClassVar[dict[exp.DType, str]] = {
+        exp.DType.DATETIME2: "fractional second precision and supported range may differ",
+        exp.DType.ROWVERSION: "values are not automatically generated or updated",
+    }
+
     UNSUPPORTED_TYPES: t.ClassVar[set[exp.DType]] = set()
 
     # mapping of DType to its default parameters, bounds
@@ -1855,6 +1863,15 @@ class Generator:
                 if isinstance(type_value, exp.DType)
                 else type_value
             )
+            if (
+                isinstance(type_value, exp.DType)
+                and type_sql != type_value.value
+                and (reason := self.APPROXIMATE_TYPE_MAPPINGS.get(type_value))
+            ):
+                self.unsupported(
+                    f"Data type {type_value.value} is approximated as {type_sql} when targeting "
+                    f"{self.dialect.__class__.__name__}: {reason}"
+                )
 
         if interior:
             if expr_nested:

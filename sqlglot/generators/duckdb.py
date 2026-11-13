@@ -1901,6 +1901,11 @@ class DuckDBGenerator(generator.Generator):
         exp.DType.DECFLOAT: ((38, 5), (38, 38)),
     }
 
+    APPROXIMATE_TYPE_MAPPINGS = {
+        **generator.Generator.APPROXIMATE_TYPE_MAPPINGS,
+        exp.DType.TIMESTAMPLTZ: "session time zone handling may differ",
+    }
+
     # https://github.com/duckdb/duckdb/blob/ff7f24fd8e3128d94371827523dae85ebaf58713/third_party/libpg_query/grammar/keywords/reserved_keywords.list#L1-L77
     RESERVED_KEYWORDS = {
         "array",
@@ -2414,6 +2419,11 @@ class DuckDBGenerator(generator.Generator):
         if expression.is_type(
             exp.DType.TIME, exp.DType.TIMETZ, exp.DType.TIMESTAMPTZ, exp.DType.TIMESTAMPLTZ
         ):
+            if expression.expressions:
+                self.unsupported(
+                    f"DuckDB does not support {expression.this.value} precision; "
+                    "the precision parameter is dropped"
+                )
             expression.set("expressions", None)
 
         return super().datatype_sql(expression)
@@ -4166,6 +4176,10 @@ class DuckDBGenerator(generator.Generator):
             return self.sql(this)
 
         if isinstance(this, exp.First):
+            self.unsupported(
+                "IGNORE NULLS is dropped when transpiling FIRST as ANY_VALUE; "
+                "NULL handling may differ"
+            )
             this = exp.AnyValue(this=this.this)
 
         if not isinstance(this, (exp.AnyValue, exp.ApproxQuantiles)):

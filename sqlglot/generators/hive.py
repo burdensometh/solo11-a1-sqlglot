@@ -510,6 +510,11 @@ class HiveGenerator(generator.Generator):
         elif (
             not self.SUPPORTS_TEMPORAL_PRECISION and expression.this in exp.DataType.TEMPORAL_TYPES
         ):
+            if expression.expressions:
+                self.unsupported(
+                    f"{self.dialect.__class__.__name__} does not support "
+                    f"{expression.this.value} precision; the precision parameter is dropped"
+                )
             expression.set("expressions", None)
         elif expression.is_type("float"):
             size_expression = expression.find(exp.DataTypeParam)

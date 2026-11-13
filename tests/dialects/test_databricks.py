@@ -1,5 +1,6 @@
-from sqlglot import exp, transpile, parse_one
+from sqlglot import ErrorLevel, exp, transpile, parse_one
 from sqlglot.errors import ParseError
+from sqlglot.generator import logger as generator_logger
 from tests.dialects.test_dialect import Validator
 
 
@@ -144,6 +145,21 @@ class TestDatabricks(Validator):
                         f"SELECT CAST(x AS {timestamp_type})",
                         read={"databricks": f"SELECT CAST(x AS {timestamp_type}({precision}))"},
                     )
+
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS TIMESTAMP(3))", read="snowflake").sql("databricks"),
+                "SELECT CAST(x AS TIMESTAMP)",
+            )
+        self.assertIn("TIMESTAMP precision 3", logs.output[0])
+
+        # Supported precisions are preserved and stay silent
+        self.assertEqual(
+            parse_one("SELECT CAST(x AS TIMESTAMP(9))", read="snowflake").sql(
+                "databricks", unsupported_level=ErrorLevel.RAISE
+            ),
+            "SELECT CAST(x AS TIMESTAMP(9))",
+        )
 
         self.validate_all(
             "SELECT CAST('2024-01-01 00:00:00' AS TIMESTAMP)",

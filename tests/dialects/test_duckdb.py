@@ -3054,6 +3054,39 @@ class TestDuckDB(Validator):
                     },
                 )
 
+    def test_semantic_drift_is_reported(self):
+        # TIMESTAMP_LTZ -> TIMESTAMPTZ is an approximation
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS TIMESTAMP_LTZ)", read="snowflake").sql("duckdb"),
+                "SELECT CAST(x AS TIMESTAMPTZ)",
+            )
+        self.assertIn("TIMESTAMPLTZ is approximated as TIMESTAMPTZ", logs.output[0])
+
+        # Unsupported temporal precision is dropped
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS TIME(7))", read="snowflake").sql("duckdb"),
+                "SELECT CAST(x AS TIME)",
+            )
+        self.assertIn("the precision parameter is dropped", logs.output[0])
+
+        # IGNORE NULLS is not preserved by the FIRST -> ANY_VALUE conversion
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT FIRST(x IGNORE NULLS)", read="snowflake").sql("duckdb"),
+                "SELECT ANY_VALUE(x)",
+            )
+        self.assertIn("IGNORE NULLS is dropped", logs.output[0])
+
+        # Equivalent rewrites stay silent
+        self.assertEqual(
+            parse_one("SELECT CAST(x AS NUMBER(38, 10))", read="snowflake").sql(
+                "duckdb", unsupported_level=ErrorLevel.RAISE
+            ),
+            "SELECT CAST(x AS DECIMAL(38, 10))",
+        )
+
     def test_timestamps_with_units(self):
         self.validate_all(
             "SELECT w::TIMESTAMP_S, x::TIMESTAMP_MS, y::TIMESTAMP_US, z::TIMESTAMP_NS",

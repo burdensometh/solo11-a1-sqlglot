@@ -139,6 +139,10 @@ class DatabricksGenerator(SparkGenerator):
             param = expression.expressions[0]
             param = param.this if isinstance(param, exp.DataTypeParam) else param
             if param.is_int and not 6 <= param.to_py() <= 9:
+                self.unsupported(
+                    f"Databricks does not support {expression.this.value} precision "
+                    f"{param.to_py()}; the precision parameter is dropped"
+                )
                 expression.set("expressions", None)
 
         return super().datatype_sql(expression)

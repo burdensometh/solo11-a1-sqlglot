@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import typing as t
+
 from sqlglot import exp, transforms
 from sqlglot.generators.tsql import TSQLGenerator
 from sqlglot.optimizer.scope import find_in_scope
 
 
-def _cap_data_type_precision(expression: exp.DataType, max_precision: int = 6) -> exp.DataType:
+def _cap_data_type_precision(
+    expression: exp.DataType,
+    max_precision: int = 6,
+    on_cap: t.Callable[[int, int], None] | None = None,
+) -> exp.DataType:
     """
     Cap the precision of to a maximum of `max_precision` digits.
     If no precision is specified, default to `max_precision`.
@@ -16,6 +22,8 @@ def _cap_data_type_precision(expression: exp.DataType, max_precision: int = 6) -
     if precision_param and precision_param.this.is_int:
         current_precision = precision_param.this.to_py()
         target_precision = min(current_precision, max_precision)
+        if on_cap and target_precision < current_precision:
+            on_cap(current_precision, target_precision)
     else:
         target_precision = max_precision
 
@@ -76,12 +84,25 @@ class FabricGenerator(TSQLGenerator):
         exp.Create: transforms.preprocess([_add_default_precision_to_varchar]),
     }
 
+    APPROXIMATE_TYPE_MAPPINGS = {
+        **TSQLGenerator.APPROXIMATE_TYPE_MAPPINGS,
+        exp.DType.TIMESTAMPTZ: "time zone information is dropped",
+    }
+
+    def _cap_temporal_precision(self, expression: exp.DataType) -> exp.DataType:
+        return _cap_data_type_precision(
+            expression,
+            on_cap=lambda old, new: self.unsupported(
+                f"Fabric does not support {expression.this.value} precision {old}; capping to {new}"
+            ),
+        )
+
     def datatype_sql(self, expression: exp.DataType) -> str:
         # Check if this is a temporal type that needs precision handling. Fabric limits temporal
         # types to max 6 digits precision. When no precision is specified, we default to 6 digits.
         if expression.is_type(*exp.DataType.TEMPORAL_TYPES) and expression.this != exp.DType.DATE:
             # Create a new expression with the capped precision
-            expression = _cap_data_type_precision(expression)
+            expression = self._cap_temporal_precision(expression)
 
         return super().datatype_sql(expression)
 
@@ -96,7 +117,7 @@ class FabricGenerator(TSQLGenerator):
                 return super().cast_sql(expression, safe_prefix)
 
             # Get the precision from the original TIMESTAMPTZ cast and cap it to 6
-            capped_data_type = _cap_data_type_precision(expression.to, max_precision=6)
+            capped_data_type = self._cap_temporal_precision(expression.to)
             precision = capped_data_type.find(exp.DataTypeParam)
             precision_value = precision.this.to_py() if precision and precision.this.is_int else 6
 
@@ -114,7 +135,7 @@ class FabricGenerator(TSQLGenerator):
         if timestamptz_cast and timestamptz_cast.to.is_type(exp.DType.TIMESTAMPTZ):
             # Get the precision from the original TIMESTAMPTZ cast and cap it to 6
             data_type = timestamptz_cast.to
-            capped_data_type = _cap_data_type_precision(data_type, max_precision=6)
+            capped_data_type = self._cap_temporal_precision(data_type)
             precision_param = capped_data_type.find(exp.DataTypeParam)
             precision = precision_param.this.to_py() if precision_param else 6
 

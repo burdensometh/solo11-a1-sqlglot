@@ -207,3 +207,28 @@ class TestGenerator(unittest.TestCase):
             expression.sql(dialect="duckdb", unsupported_level=ErrorLevel.RAISE),
             "SELECT x[1:2] FROM t",
         )
+
+    def test_approximate_type_mapping_is_reported(self):
+        # DATETIME2 -> TIMESTAMP is an approximation: precision/range may differ
+        expression = parse_one("SELECT CAST(x AS DATETIME2)", read="tsql")
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(expression.sql(dialect="postgres"), "SELECT CAST(x AS TIMESTAMP)")
+        self.assertIn("Data type DATETIME2 is approximated as TIMESTAMP", logs.output[0])
+
+        with self.assertRaises(UnsupportedError):
+            expression.sql(dialect="postgres", unsupported_level=ErrorLevel.RAISE)
+
+        # ROWVERSION loses its auto-update behavior when mapped to a binary type
+        expression = parse_one("SELECT CAST(x AS ROWVERSION)", read="tsql")
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(expression.sql(dialect="hive"), "SELECT CAST(x AS BINARY)")
+        self.assertIn("Data type ROWVERSION is approximated as BINARY", logs.output[0])
+
+        # Exact equivalents stay silent: identity mappings and semantics-preserving renames
+        for sql, read, write in (
+            ("SELECT CAST(x AS DATETIME2)", "tsql", "tsql"),
+            ("SELECT CAST(x AS NCHAR(5))", "tsql", "postgres"),
+            ("SELECT CAST(x AS INT)", "tsql", "postgres"),
+        ):
+            with self.subTest(sql=sql, read=read, write=write):
+                parse_one(sql, read=read).sql(dialect=write, unsupported_level=ErrorLevel.RAISE)

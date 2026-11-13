@@ -1,5 +1,6 @@
 from tests.dialects.test_dialect import Validator
-from sqlglot import UnsupportedError, exp
+from sqlglot import UnsupportedError, exp, parse_one
+from sqlglot.generator import logger as generator_logger
 
 
 class TestHive(Validator):
@@ -116,6 +117,14 @@ class TestHive(Validator):
                 "spark": "SHIFTRIGHT(x, 1)",
             },
         )
+
+    def test_temporal_precision_drop_is_reported(self):
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS TIMESTAMP(9))", read="snowflake").sql("hive"),
+                "SELECT CAST(x AS TIMESTAMP)",
+            )
+        self.assertIn("the precision parameter is dropped", logs.output[0])
 
     def test_cast(self):
         self.validate_all(

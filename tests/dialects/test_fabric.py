@@ -1,3 +1,5 @@
+from sqlglot import ErrorLevel, parse_one
+from sqlglot.generator import logger as generator_logger
 from tests.dialects.test_dialect import Validator
 
 
@@ -77,6 +79,31 @@ class TestFabric(Validator):
         self.validate_identity(
             "CAST(x AS TIMESTAMPTZ(9))",
             "CAST(x AS DATETIME2(6))",
+        )
+
+    def test_semantic_drift_is_reported(self):
+        # TIMESTAMPTZ loses its time zone information when mapped to DATETIME2
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS TIMESTAMPTZ)", read="snowflake").sql("fabric"),
+                "SELECT CAST(x AS DATETIME2(6))",
+            )
+        self.assertIn("time zone information is dropped", logs.output[0])
+
+        # Temporal precision above 6 is capped
+        with self.assertLogs(generator_logger, level="WARNING") as logs:
+            self.assertEqual(
+                parse_one("SELECT CAST(x AS DATETIME2(9))", read="tsql").sql("fabric"),
+                "SELECT CAST(x AS DATETIME2(6))",
+            )
+        self.assertIn("capping to 6", logs.output[0])
+
+        # Precision within limits is preserved and stays silent
+        self.assertEqual(
+            parse_one("SELECT CAST(x AS DATETIME2(3))", read="tsql").sql(
+                "fabric", unsupported_level=ErrorLevel.RAISE
+            ),
+            "SELECT CAST(x AS DATETIME2(3))",
         )
 
     def test_timestamptz_with_at_time_zone(self):
