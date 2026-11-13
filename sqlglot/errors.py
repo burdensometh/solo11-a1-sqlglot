@@ -10,6 +10,7 @@ from sqlglot.helper import AutoName
 ANSI_UNDERLINE = "\033[4m"
 ANSI_RESET = "\033[0m"
 ERROR_MESSAGE_CONTEXT_DEFAULT = 100
+ERROR_POSITION_CONTEXT_DEFAULT = 20
 
 
 class ErrorLevel(AutoName):
@@ -69,6 +70,45 @@ class ParseError(SqlglotError):
                 }
             ],
         )
+
+    def _first_error(self) -> dict[str, t.Any]:
+        return self.errors[0] if self.errors else {}
+
+    @property
+    def description(self) -> str | None:
+        """The description of the first error, without any formatting."""
+        return self._first_error().get("description")
+
+    @property
+    def line(self) -> int | None:
+        """The 1-based line number of the token that caused the first error."""
+        return self._first_error().get("line")
+
+    @property
+    def col(self) -> int | None:
+        """The column number of the token that caused the first error."""
+        return self._first_error().get("col")
+
+    @property
+    def highlight(self) -> str | None:
+        """The source text of the token(s) that caused the first error."""
+        return self._first_error().get("highlight")
+
+    def context(self, max_length: int = ERROR_POSITION_CONTEXT_DEFAULT) -> str:
+        """
+        The highlighted source of the first error, surrounded by up to
+        `max_length` characters of context on each side.
+        """
+        error = self._first_error()
+        start_context = error.get("start_context") or ""
+        highlight = error.get("highlight") or ""
+        end_context = error.get("end_context") or ""
+        if max_length > 0:
+            start_context = start_context[-max_length:]
+            end_context = end_context[:max_length]
+        else:
+            start_context = end_context = ""
+        return f"{start_context}{highlight}{end_context}"
 
 
 class TokenError(SqlglotError):

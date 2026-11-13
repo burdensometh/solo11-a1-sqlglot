@@ -14,6 +14,11 @@ import logging
 import typing as t
 
 from sqlglot import expressions as exp
+from sqlglot.batch import (
+    BatchParseFailure as BatchParseFailure,
+    BatchParseReport as BatchParseReport,
+    parse_batch as parse_batch,
+)
 from sqlglot.dialects.dialect import Dialect as Dialect, Dialects as Dialects
 from sqlglot.diff import diff as diff
 from sqlglot.errors import (

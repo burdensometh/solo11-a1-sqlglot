@@ -1,9 +1,40 @@
 import unittest
 
-from sqlglot.errors import highlight_sql, ANSI_UNDERLINE, ANSI_RESET
+import sqlglot
+from sqlglot.errors import ParseError, highlight_sql, ANSI_UNDERLINE, ANSI_RESET
 
 
 class TestErrors(unittest.TestCase):
+    def test_parse_error_position(self):
+        with self.assertRaises(ParseError) as ctx:
+            sqlglot.parse_one("SELECT foo FROM WHERE x")
+
+        error = ctx.exception
+        self.assertEqual(error.line, 1)
+        self.assertEqual(error.col, 21)
+        self.assertEqual(error.highlight, "WHERE")
+        self.assertIn("Expected table name", error.description)
+        self.assertEqual(error.context(), "SELECT foo FROM WHERE x")
+
+    def test_parse_error_context_trimming(self):
+        sql = "SELECT " + "a" * 40 + " FROM WHERE x"
+        with self.assertRaises(ParseError) as ctx:
+            sqlglot.parse_one(sql)
+
+        error = ctx.exception
+        self.assertEqual(error.context(), "a" * 14 + " FROM WHERE x")
+        self.assertEqual(error.context(5), "FROM WHERE x")
+        self.assertEqual(error.context(0), "WHERE")
+
+    def test_parse_error_without_position(self):
+        error = ParseError("No expression was parsed from ''")
+
+        self.assertIsNone(error.line)
+        self.assertIsNone(error.col)
+        self.assertIsNone(error.highlight)
+        self.assertIsNone(error.description)
+        self.assertEqual(error.context(), "")
+
     def test_highlight_sql_single_character(self):
         sql = "SELECT a FROM t"
         formatted, start_ctx, highlight, end_ctx = highlight_sql(sql, [(7, 7)])
