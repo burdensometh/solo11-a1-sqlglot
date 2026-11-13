@@ -205,7 +205,9 @@ class TypeAnnotator:
         dialect = schema.dialect or Dialect()
         self.dialect = dialect
         self.expression_metadata = expression_metadata or dialect.EXPRESSION_METADATA
-        self.coerces_to = coerces_to or dialect.COERCES_TO or self.COERCES_TO
+        # The coercion lattice is deliberately not dialect-specific: a given query must
+        # produce a single, deterministic type judgment regardless of the dialect
+        self.coerces_to = coerces_to or self.COERCES_TO
         self.binary_coercions = binary_coercions or self.BINARY_COERCIONS
 
         # Keep annotated nodes alive so their ids cannot be reused while cached
@@ -668,6 +670,9 @@ class TypeAnnotator:
 
         If either type is parameterized (e.g. DECIMAL(18, 2) contains two parameters),
         we assume type1 does not coerce into type2, so we also return it in this case.
+
+        If neither type can be coerced into the other, the pair is irreconcilable and
+        UNKNOWN is returned instead of arbitrarily picking one of the two types.
         """
         if isinstance(type1, exp.DataType):
             if type1.expressions or not isinstance(type1.this, exp.DType):
@@ -692,7 +697,13 @@ class TypeAnnotator:
         if type2_value == exp.DType.NULL:
             return type1_value
 
-        return type2_value if type2_value in self.coerces_to.get(type1_value, {}) else type1_value
+        if type2_value in self.coerces_to.get(type1_value, {}):
+            return type2_value
+
+        if type1_value == type2_value or type1_value in self.coerces_to.get(type2_value, {}):
+            return type1_value
+
+        return exp.DType.UNKNOWN
 
     def _get_setop_column_types(
         self, expression: exp.SetOperation

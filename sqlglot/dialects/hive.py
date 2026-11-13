@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from collections import defaultdict
-
 from sqlglot import exp, jsonpath, tokens
-from sqlglot.dialects.dialect import (
+ from sqlglot.dialects.dialect import (
     AliasPrecedence,
     Dialect,
     NormalizationStrategy,
@@ -12,7 +9,6 @@ from sqlglot.dialects.dialect import (
 from sqlglot.generators.hive import HiveGenerator
 from sqlglot.parsers.hive import HiveParser
 from sqlglot.tokens import TokenType
-from sqlglot.optimizer.annotate_types import TypeAnnotator
 from sqlglot.typing.hive import EXPRESSION_METADATA
 
 

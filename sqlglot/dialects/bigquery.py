@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import typing as t
-
-
-from sqlglot.optimizer.annotate_types import TypeAnnotator
-
 from sqlglot import exp, jsonpath, tokens
 from sqlglot.parsers.bigquery import BigQueryParser
 from sqlglot.generators.bigquery import BigQueryGenerator
@@ -14,9 +9,6 @@ from sqlglot.dialects.dialect import (
 )
 from sqlglot.tokens import TokenType
 from sqlglot.typing.bigquery import EXPRESSION_METADATA
-
-if t.TYPE_CHECKING:
-    from sqlglot.optimizer.annotate_types import TypeAnnotator
 
 
 class BigQuery(Dialect):
@@ -112,21 +104,6 @@ class BigQuery(Dialect):
 
     # All set operations require either a DISTINCT or ALL specifier
     SET_OP_DISTINCT_BY_DEFAULT = dict.fromkeys((exp.Except, exp.Intersect, exp.Union), None)
-
-    # https://cloud.google.com/bigquery/docs/reference/standard-sql/navigation_functions#percentile_cont
-    COERCES_TO = {
-        **TypeAnnotator.COERCES_TO,
-        exp.DType.BIGDECIMAL: {exp.DType.DOUBLE},
-    }
-    COERCES_TO[exp.DType.DECIMAL] |= {exp.DType.BIGDECIMAL}
-    COERCES_TO[exp.DType.BIGINT] |= {exp.DType.BIGDECIMAL}
-    COERCES_TO[exp.DType.VARCHAR] |= {
-        exp.DType.DATE,
-        exp.DType.DATETIME,
-        exp.DType.TIME,
-        exp.DType.TIMESTAMP,
-        exp.DType.TIMESTAMPTZ,
-    }
 
     EXPRESSION_METADATA = EXPRESSION_METADATA.copy()
 
