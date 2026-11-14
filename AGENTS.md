@@ -131,6 +131,8 @@ SQLGlot follows a classic compiler architecture with three main phases:
 - Requires target query, upstream queries, and root table schemas
 - Builds linked list of `Node` objects representing data flow
 - Can visualize with `node.to_html()`
+- `flatten_lineage()` / `Node.flatten()` collapse the tree into `FlatLineage` rows
+  (source table, source field, expressions), sorted by target field
 
 ## Key Concepts
 

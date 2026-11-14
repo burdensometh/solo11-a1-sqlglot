@@ -21,6 +21,77 @@ logger = logging.getLogger("sqlglot")
 
 
 @dataclass(frozen=True)
+class SourceField:
+    """A source field that contributes to an output field.
+
+    Attributes:
+        table: The source table. For a physical table this is the fully qualified name,
+            e.g. `catalog.db.table`. For an inline relation (`VALUES`, `UNNEST`) or an
+            unresolved source it's the relation's name or alias, and it's empty for
+            constants.
+        column: The source field name. It's empty for constants and `*` for a star that
+            couldn't be expanded (e.g. `SELECT *` without a schema).
+        expressions: The SQL expressions that this field went through, ordered from the
+            source field to the output field. Plain column references (pass-throughs and
+            renames) are omitted, because they don't transform the value.
+    """
+
+    table: str
+    column: str
+    expressions: tuple[str, ...] = ()
+
+    @property
+    def expression(self) -> str:
+        """The expressions joined into a single `->` separated string."""
+        return " -> ".join(self.expressions)
+
+    def to_dict(self) -> dict[str, t.Any]:
+        """Returns a JSON-serializable representation of this source field."""
+        return {
+            "source_table": self.table,
+            "source_column": self.column,
+            "expressions": list(self.expressions),
+        }
+
+
+@dataclass(frozen=True)
+class FlatLineage:
+    """All the source fields that a single output field is computed from.
+
+    `lineage()` returns a tree, so answering "which source fields is this output field
+    computed from" requires walking it level by level, which doesn't scale to wide
+    queries. `flatten_lineage()` collapses every root-to-leaf path into one row per
+    output field, with one deduplicated entry per source field. Rows are sorted by the
+    output field name.
+
+    Attributes:
+        target: The output field name.
+        sources: The source fields, deduplicated and sorted by table and column. A field
+            can appear more than once if it reaches the target through different
+            expressions (e.g. through different UNION branches).
+    """
+
+    target: str
+    sources: tuple[SourceField, ...]
+
+    def to_dict(self) -> dict[str, t.Any]:
+        """Returns a JSON-serializable representation of this row."""
+        return {"target": self.target, "sources": [source.to_dict() for source in self.sources]}
+
+    def to_rows(self) -> list[dict[str, t.Any]]:
+        """Flattens the row further, emitting one dict per source field."""
+        return [{"target": self.target, **source.to_dict()} for source in self.sources]
+
+    def __str__(self) -> str:
+        sources = ", ".join(
+            f"{source.table + '.' if source.table else ''}{source.column or '<expression>'}"
+            + (f" [{source.expression}]" if source.expressions else "")
+            for source in self.sources
+        )
+        return f"{self.target} <- {sources}"
+
+
+@dataclass(frozen=True)
 class Node:
     name: str
     expression: exp.Expr
@@ -76,6 +147,84 @@ class Node:
             for d in node.downstream:
                 edges.append({"from": node_id, "to": id(d)})
         return GraphHTML(nodes, edges, **opts)
+
+    def flatten(self, dialect: DialectType = None, dedupe: bool = True) -> FlatLineage:
+        """Collapses this node's lineage tree into the flat lineage of its target field.
+
+        Every root-to-leaf path produces one source field; the expression steps along
+        the way are recorded in order, from the source to the target. Paths that only
+        reference columns keep no expressions, since a pass-through or a rename doesn't
+        transform the value.
+
+        Args:
+            dialect: The dialect used to generate the expressions, if expressions are
+                captured.
+            dedupe: Whether to remove source fields that are repeated with the same
+                expressions, e.g. because a column is referenced twice by a projection
+                or because two UNION branches read the same column.
+
+        Returns:
+            A FlatLineage for this node's target field.
+        """
+        target = self.expression.alias_or_name or self.name
+
+        # Iterative post-order traversal. Nodes are shared across paths by the lineage
+        # cache, so each node's contributions are computed once and reused by every
+        # parent; nodes that would lead back into the current path are skipped.
+        order: list[Node] = []
+        completed: set[int] = set()
+        on_stack: set[int] = set()
+        pending: list[tuple[Node, bool]] = [(self, False)]
+        while pending:
+            node, expanded = pending.pop()
+            node_id = id(node)
+
+            if expanded:
+                on_stack.discard(node_id)
+                completed.add(node_id)
+                order.append(node)
+                continue
+
+            if node_id in completed or node_id in on_stack:
+                continue
+
+            on_stack.add(node_id)
+            pending.append((node, True))
+            for child in reversed(node.downstream):
+                if id(child) not in on_stack:
+                    pending.append((child, False))
+
+        # Each node's contributions carry the expressions from the source field up to and
+        # including that node, so a parent only has to append its own expression step
+        contributions: dict[int, list[SourceField]] = {}
+        for node in order:
+            expression = _expression_sql(node, dialect)
+            step = (expression,) if expression else ()
+
+            if not node.downstream:
+                sources = [_source_field(node, step)]
+            else:
+                sources = []
+                for child in node.downstream:
+                    for source in contributions.get(id(child)) or ():
+                        sources.append(
+                            SourceField(
+                                table=source.table,
+                                column=source.column,
+                                expressions=source.expressions + step,
+                            )
+                        )
+
+                if dedupe:
+                    # Identical rows are collapsed, e.g. when both sides of a self-join
+                    # or two identical UNION branches read the same field
+                    sources = list(dict.fromkeys(sources))
+
+            contributions[id(node)] = sources
+
+        sources = contributions.get(id(self), [])
+        ordered = sorted(sources, key=lambda s: (s.table, s.column, s.expressions))
+        return FlatLineage(target=target, sources=tuple(ordered))
 
 
 @t.overload
@@ -195,6 +344,172 @@ def lineage(
         )
 
     return result
+
+
+@t.overload
+def flatten_lineage(
+    column: str | exp.Column, sql: str | exp.Expr, schema: dict | Schema, **kwargs: t.Any
+) -> FlatLineage: ...
+
+
+@t.overload
+def flatten_lineage(
+    column: None, sql: str | exp.Expr, schema: dict | Schema, **kwargs: t.Any
+) -> list[FlatLineage]: ...
+
+
+def flatten_lineage(
+    column: str | exp.Column | None,
+    sql: str | exp.Expr,
+    schema: dict | Schema,
+    sources: Mapping[str, str | exp.Query] | None = None,
+    dialect: DialectType = None,
+    scope: Scope | None = None,
+    trim_selects: bool = True,
+    copy: bool = True,
+    on_node: t.Callable[[Node], None] | None = None,
+    dedupe: bool = True,
+    **kwargs,
+) -> FlatLineage | list[FlatLineage]:
+    """Build the flattened lineage of one or more output columns.
+
+    Unlike `lineage()`, which returns a tree of `Node`s, this returns one `FlatLineage`
+    per output column: the source fields it's computed from, plus the expressions it
+    went through. Plain column references are omitted from the expressions, and source
+    fields are deduplicated. When a column is requested, a single FlatLineage is
+    returned; otherwise the rows are sorted by output column name.
+
+    Args:
+        column: The column to build the lineage for. Pass None to get all output columns.
+        sql: The SQL string or expression.
+        schema: The schema of tables.
+        sources: A mapping of queries which will be used to continue building lineage.
+        dialect: The dialect of input SQL.
+        scope: A pre-created scope to use instead.
+        trim_selects: Whether to clean up selects by trimming to only relevant columns.
+        copy: Whether to copy the Expr arguments.
+        on_node: Optional callback invoked for every Node created during the walk.
+        dedupe: Whether to drop repeated source fields from the output.
+        **kwargs: Qualification optimizer kwargs.
+
+    Returns:
+        A FlatLineage when `column` is provided, or a list[FlatLineage] when it's None.
+    """
+    nodes = lineage(
+        column,
+        sql,
+        schema,
+        sources=sources,
+        dialect=dialect,
+        scope=scope,
+        trim_selects=trim_selects,
+        copy=copy,
+        on_node=on_node,
+        **kwargs,
+    )
+
+    if isinstance(nodes, Node):
+        return nodes.flatten(dialect=dialect, dedupe=dedupe)
+
+    return sorted(
+        (node.flatten(dialect=dialect, dedupe=dedupe) for node in nodes.values()),
+        key=lambda flat: flat.target,
+    )
+
+
+def _expression_sql(node: Node, dialect: DialectType) -> str:
+    """Returns the SQL of a node's expression if it transforms the value, otherwise "".
+
+    Plain column references (pass-throughs and renames) are skipped, as are the nodes the
+    traversal synthesizes: physical table leaves, set operation nodes (whose branches each
+    contribute their own expression), stars, and column identifiers of inline relations.
+    """
+    expression = node.expression
+
+    if expression is node.source or isinstance(
+        expression, (exp.Table, exp.Star, exp.Identifier, exp.Placeholder, exp.Select)
+    ):
+        return ""
+
+    if isinstance(node.source, exp.SetOperation):
+        # A set operation node copies one branch's projection; every branch is visited
+        # separately, so keeping it would duplicate that branch's expression
+        return ""
+
+    if isinstance(expression, exp.Alias):
+        alias = expression.alias
+        expression = expression.this
+    else:
+        alias = ""
+
+    if isinstance(expression, exp.Column):
+        return ""
+
+    sql = expression.sql(dialect=dialect, comments=False)
+    return f"{sql} AS {alias}" if alias else sql
+
+
+def _split_name(name: str) -> tuple[str, str]:
+    """Splits a node name like `table.column` into its unquoted table and column parts."""
+    try:
+        column = exp.to_column(name, dialect=None)
+    except SqlglotError:
+        column = None
+
+    if isinstance(column, exp.Column):
+        return column.table, column.name
+    if isinstance(column, exp.Star):
+        return "", "*"
+
+    table, _, name = name.rpartition(".")
+    return table, name or "*"
+
+
+def _table_name(table: exp.Table) -> str:
+    """Returns the fully qualified name of a table, e.g. `catalog.db.table`."""
+    return ".".join(part.name for part in table.parts)
+
+
+def _source_field(node: Node, expressions: tuple[str, ...]) -> SourceField:
+    """Builds the source field for a leaf node, keeping only value-transforming steps."""
+    expression = node.expression
+    source = node.source
+    expressions = tuple(step for step in expressions if step)
+    table, column = _split_name(node.name)
+
+    if isinstance(expression, exp.Table):
+        # A physical table; the node name is the column that was read from it
+        return SourceField(table=_table_name(expression), column=column, expressions=expressions)
+
+    if isinstance(source, exp.Table):
+        # The value is attributed to a physical table but isn't read from one of its
+        # columns directly (e.g. a UDTF output that's a function of a column)
+        return SourceField(table=_table_name(source), column=column, expressions=expressions)
+
+    if isinstance(expression, exp.Placeholder):
+        # The source couldn't be resolved (e.g. a table that's missing from `sources`),
+        # so keep the referenced column, which the node name still carries
+        return SourceField(table=table, column=column, expressions=expressions)
+
+    if isinstance(source, (exp.Values, exp.Unnest)):
+        # An inline relation has no upstream table, so it's its own source
+        return SourceField(table=source.alias_or_name, column=column, expressions=expressions)
+
+    if isinstance(expression, (exp.Star, exp.Query)):
+        # An unexpanded star: the relation is the source but its columns are unknown
+        relation = expression.alias_or_name
+        if not relation:
+            # A derived table / CTE is named by its alias on the wrapping node
+            parent = source.parent
+            relation = parent.alias_or_name if parent is not None else ""
+        return SourceField(table=relation or "", column="*", expressions=expressions)
+
+    if isinstance(expression, exp.Identifier):
+        # A column of an inline relation that wasn't attributed to its source
+        return SourceField(table=table, column=column, expressions=expressions)
+
+    # No column reference at all: a constant, e.g. a literal or a function of literals
+    return SourceField(table="", column="", expressions=expressions)
 
 
 def to_node(

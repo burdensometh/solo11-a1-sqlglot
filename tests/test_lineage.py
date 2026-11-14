@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 import sqlglot
-from sqlglot.lineage import lineage
+from sqlglot.lineage import FlatLineage, SourceField, flatten_lineage, lineage
 from sqlglot.schema import MappingSchema
 
 
@@ -1379,3 +1379,249 @@ class TestLineage(unittest.TestCase):
                 seen.add(id(node))
         for nid in seen:
             self.assertEqual(counts.get(nid, 0), 1)
+
+
+class TestFlatLineage(unittest.TestCase):
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        sqlglot.schema = MappingSchema()
+
+    def test_flat_lineage_all_columns_sorted(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT b + 1 AS bp, a FROM x",
+            schema={"x": {"a": "int", "b": "int"}},
+        )
+
+        self.assertEqual([row.target for row in rows], ["a", "bp"])
+        self.assertEqual(rows[0].sources, (SourceField(table="x", column="a"),))
+        self.assertEqual(
+            rows[1].sources, (SourceField(table="x", column="b", expressions=("x.b + 1 AS bp",)),)
+        )
+
+    def test_flat_lineage_single_column(self) -> None:
+        row = flatten_lineage(
+            "bp", "SELECT a, b + 1 AS bp FROM x", schema={"x": {"a": "int", "b": "int"}}
+        )
+
+        self.assertIsInstance(row, FlatLineage)
+        self.assertEqual(row.target, "bp")
+        self.assertEqual(
+            row.sources, (SourceField(table="x", column="b", expressions=("x.b + 1 AS bp",)),)
+        )
+
+    def test_flat_lineage_through_cte_keeps_expression_order(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "WITH t AS (SELECT a + 1 AS v FROM x) SELECT v * 2 AS w FROM t",
+            schema={"x": {"a": "int"}},
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(
+            rows[0].sources,
+            (
+                SourceField(
+                    table="x",
+                    column="a",
+                    expressions=("x.a + 1 AS v", "t.v * 2 AS w"),
+                ),
+            ),
+        )
+        self.assertEqual(rows[0].sources[0].expression, "x.a + 1 AS v -> t.v * 2 AS w")
+
+    def test_flat_lineage_multiple_sources(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT a.a + b.b AS s FROM t1 AS a, t2 AS b",
+            schema={"t1": {"a": "int"}, "t2": {"b": "int"}},
+        )
+
+        self.assertEqual(
+            rows[0].sources,
+            (
+                SourceField(table="t1", column="a", expressions=("a.a + b.b AS s",)),
+                SourceField(table="t2", column="b", expressions=("a.a + b.b AS s",)),
+            ),
+        )
+
+    def test_flat_lineage_renames_have_no_expressions(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "WITH t AS (SELECT a AS b FROM x) SELECT b AS c FROM t",
+            schema={"x": {"a": "int"}},
+        )
+
+        self.assertEqual(rows[0].target, "c")
+        self.assertEqual(rows[0].sources, (SourceField(table="x", column="a"),))
+
+    def test_flat_lineage_dedupes_repeated_sources(self) -> None:
+        sql = "SELECT a + a AS s FROM x"
+        schema = {"x": {"a": "int"}}
+
+        self.assertEqual(
+            flatten_lineage(None, sql, schema=schema)[0].sources,
+            (SourceField(table="x", column="a", expressions=("x.a + x.a AS s",)),),
+        )
+        union_sql = "SELECT a FROM x UNION ALL SELECT a FROM x"
+        self.assertEqual(
+            flatten_lineage(None, union_sql, schema=schema)[0].sources,
+            (SourceField(table="x", column="a"),),
+        )
+        # A UNION reads the same source through both of its branches, which only
+        # collapses into one row after deduplication
+        self.assertEqual(
+            len(flatten_lineage(None, union_sql, schema=schema, dedupe=False)[0].sources), 2
+        )
+
+    def test_flat_lineage_union_branches(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT a + 1 AS a FROM x UNION ALL SELECT b * 2 AS a FROM y",
+            schema={"x": {"a": "int"}, "y": {"b": "int"}},
+        )
+
+        self.assertEqual(
+            rows[0].sources,
+            (
+                SourceField(table="x", column="a", expressions=("x.a + 1 AS a",)),
+                SourceField(table="y", column="b", expressions=("y.b * 2 AS a",)),
+            ),
+        )
+
+    def test_flat_lineage_union_branches_keep_shared_steps(self) -> None:
+        rows = flatten_lineage(
+            None,
+            """
+            WITH u AS (SELECT a + 1 AS a FROM x UNION ALL SELECT b * 2 AS a FROM y)
+            SELECT a * 10 AS z FROM u
+            """,
+            schema={"x": {"a": "int"}, "y": {"b": "int"}},
+        )
+
+        self.assertEqual(
+            rows[0].sources,
+            (
+                SourceField(table="x", column="a", expressions=("x.a + 1 AS a", "u.a * 10 AS z")),
+                SourceField(table="y", column="b", expressions=("y.b * 2 AS a", "u.a * 10 AS z")),
+            ),
+        )
+
+    def test_flat_lineage_qualified_table(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT t.a AS z FROM catalog.db.tbl AS t",
+            schema={"catalog": {"db": {"tbl": {"a": "int"}}}},
+        )
+
+        self.assertEqual(rows[0].sources, (SourceField(table="catalog.db.tbl", column="a"),))
+        self.assertEqual(rows[0].to_dict()["sources"][0]["source_table"], "catalog.db.tbl")
+        self.assertEqual(rows[0].to_dict()["sources"][0]["source_column"], "a")
+
+    def test_flat_lineage_constants(self) -> None:
+        rows = flatten_lineage(None, "SELECT 1 AS one, CAST('2' AS INT) AS two", schema={})
+
+        self.assertEqual(
+            rows[0].sources, (SourceField(table="", column="", expressions=("1 AS one",)),)
+        )
+        self.assertEqual(
+            rows[1].sources,
+            (SourceField(table="", column="", expressions=("CAST('2' AS INT) AS two",)),),
+        )
+        self.assertEqual(str(rows[0]), "one <- <expression> [1 AS one]")
+
+    def test_flat_lineage_star(self) -> None:
+        rows = flatten_lineage(None, "SELECT * FROM x", schema={"x": {"a": "int", "b": "int"}})
+
+        self.assertEqual([row.target for row in rows], ["a", "b"])
+        self.assertTrue(all(row.sources[0].table == "x" for row in rows))
+
+        # Without a schema the star can't be expanded, so the source field is unknown
+        rows = flatten_lineage(None, "SELECT * FROM x", schema={})
+        self.assertEqual(rows[0].target, "*")
+        self.assertEqual(rows[0].sources, (SourceField(table="x", column="*"),))
+
+        # A star that isn't expanded is attributed to the relation it reads from
+        rows = flatten_lineage(
+            None,
+            "SELECT * FROM (SELECT a FROM x) AS s",
+            schema={"x": {"a": "int"}},
+            expand_stars=False,
+        )
+        self.assertEqual(rows[0].sources, (SourceField(table="s", column="*"),))
+
+    def test_flat_lineage_inline_relation(self) -> None:
+        rows = flatten_lineage(None, "SELECT a FROM (VALUES (1, 2)) AS t(a, b)", schema={})
+
+        self.assertEqual(rows[0].sources, (SourceField(table="t", column="a"),))
+
+    def test_flat_lineage_unresolved_source(self) -> None:
+        rows = flatten_lineage(None, "SELECT z.a AS c FROM x", schema={"x": {"a": "int"}})
+
+        self.assertEqual(rows[0].sources, (SourceField(table="z", column="a"),))
+
+    def test_flat_lineage_sources_map(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT a FROM z",
+            schema={"x": {"a": "int"}},
+            sources={"y": "SELECT * FROM x", "z": "SELECT a FROM y"},
+        )
+
+        self.assertEqual(rows[0].sources, (SourceField(table="x", column="a"),))
+
+    def test_flat_lineage_case_and_window(self) -> None:
+        rows = flatten_lineage(
+            None,
+            "SELECT SUM(a) OVER (PARTITION BY b) AS s FROM x",
+            schema={"x": {"a": "int", "b": "int"}},
+        )
+
+        self.assertEqual(
+            rows[0].sources,
+            (
+                SourceField(
+                    table="x", column="a", expressions=("SUM(x.a) OVER (PARTITION BY x.b) AS s",)
+                ),
+                SourceField(
+                    table="x", column="b", expressions=("SUM(x.a) OVER (PARTITION BY x.b) AS s",)
+                ),
+            ),
+        )
+
+    def test_flat_lineage_node_flatten(self) -> None:
+        node = lineage("a", "SELECT a FROM x", schema={"x": {"a": "int"}})
+        flat = node.flatten()
+
+        self.assertEqual(flat.target, "a")
+        self.assertEqual(flat.sources, (SourceField(table="x", column="a"),))
+
+    def test_flat_lineage_to_dict(self) -> None:
+        row = flatten_lineage("bp", "SELECT b + 1 AS bp FROM x", schema={"x": {"b": "int"}})
+
+        self.assertEqual(
+            row.to_dict(),
+            {
+                "target": "bp",
+                "sources": [
+                    {
+                        "source_table": "x",
+                        "source_column": "b",
+                        "expressions": ["x.b + 1 AS bp"],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            row.to_rows(),
+            [
+                {
+                    "target": "bp",
+                    "source_table": "x",
+                    "source_column": "b",
+                    "expressions": ["x.b + 1 AS bp"],
+                }
+            ],
+        )

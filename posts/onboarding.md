@@ -510,3 +510,30 @@ This approach incrementally builds a linked list of `Nodes` that traces the line
 The `lineage()` output can be visualized using the `node.to_html()` function, which generates an HTML lineage graph using `vis.js`.
 
 ![Lineage](onboarding_images/lineage_img.png)
+
+Since the lineage graph is a tree, reading it requires walking it level by level. When the question is simply "which source fields is this output field computed from", use `flatten_lineage()` instead, which collapses every root-to-leaf path into one row per output column, sorted by the output column name:
+
+```Python
+from sqlglot.lineage import flatten_lineage
+
+rows = flatten_lineage(
+    None,
+    """
+    WITH cte AS (
+      SELECT traced_col * 2 AS traced_col
+      FROM intermediate_table
+    )
+    SELECT traced_col FROM cte
+    """,
+    sources={"intermediate_table": "SELECT * FROM root_table"},
+    schema={"root_table": {"traced_col": "int"}},
+)
+
+for row in rows:
+    for source in row.sources:
+        print(row.target, source.table, source.column, source.expressions)
+# traced_col root_table traced_col ('intermediate_table.traced_col * 2 AS traced_col',)
+```
+
+Each row carries its source fields with the expressions they went through, ordered from the source field to the output field. Plain column references (pass-throughs and renames) are omitted, and repeated source fields are deduplicated. Passing a `column` instead of `None` returns a single row.
+
